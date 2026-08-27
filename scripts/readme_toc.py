@@ -40,12 +40,26 @@ def generate_toc_lines(content: str) -> List[str]:
     """
     lines = content.splitlines()
     headings = []
-    in_code = False
+    fence: tuple[str, int] | None = None
     for line in lines:
-        if line.strip().startswith("```"):
-            in_code = not in_code
-            continue
-        if in_code:
+        fence_match = re.match(r"^ {0,3}(?P<marker>`{3,}|~{3,})(?P<rest>.*)$", line)
+        if fence is None:
+            if fence_match is not None:
+                marker = fence_match.group("marker")
+                if marker[0] == "`" and "`" in fence_match.group("rest"):
+                    continue
+                fence = (marker[0], len(marker))
+            if fence is not None:
+                continue
+
+        if fence is not None and (
+            fence_match is not None
+            and fence_match.group("marker")[0] == fence[0]
+            and len(fence_match.group("marker")) >= fence[1]
+            and not fence_match.group("rest").strip()
+        ):
+            fence = None
+        if fence is not None:
             continue
         m = re.match(r"^(#{2,6})\s+(.*)$", line)
         if not m:
