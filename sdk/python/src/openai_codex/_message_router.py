@@ -31,6 +31,7 @@ class MessageRouter:
         self._pending_login_notifications: dict[str, deque[Notification]] = {}
         self._turn_notifications: dict[str, queue.Queue[NotificationQueueItem]] = {}
         self._pending_turn_notifications: dict[str, deque[Notification]] = {}
+        self._pending_turn_starts: dict[str, set[str]] = {}
         self._goal_operations: dict[str, _GoalOperationState] = {}
         self._global_notifications: queue.Queue[NotificationQueueItem] = queue.Queue()
 
@@ -99,6 +100,36 @@ class MessageRouter:
             self._turn_notifications[turn_id] = turn_queue
         for notification in pending:
             turn_queue.put(notification)
+
+    def begin_turn_start(self, thread_id: str) -> None:
+        """Reserve a thread so its first turn events are retained before its id is known."""
+        with self._lock:
+            if thread_id in self._pending_turn_starts:
+                raise RuntimeError(f"thread {thread_id!r} already has a pending turn start")
+            self._pending_turn_starts[thread_id] = set()
+
+    def complete_turn_start(self, thread_id: str, turn_id: str) -> None:
+        """Bind a completed turn/start response to a queue with all early events."""
+        turn_queue: queue.Queue[NotificationQueueItem]
+        with self._lock:
+            observed_turn_ids = self._pending_turn_starts.pop(thread_id, set())
+            pending = self._pending_turn_notifications.pop(turn_id, deque())
+            for observed_turn_id in observed_turn_ids:
+                if observed_turn_id != turn_id:
+                    self._pending_turn_notifications.pop(observed_turn_id, None)
+            turn_queue = self._turn_notifications.get(turn_id)
+            if turn_queue is None:
+                turn_queue = queue.Queue()
+                self._turn_notifications[turn_id] = turn_queue
+        for notification in pending:
+            turn_queue.put(notification)
+
+    def cancel_turn_start(self, thread_id: str) -> None:
+        """Drop retained notifications when a reserved turn/start request fails."""
+        with self._lock:
+            observed_turn_ids = self._pending_turn_starts.pop(thread_id, set())
+            for turn_id in observed_turn_ids:
+                self._pending_turn_notifications.pop(turn_id, None)
 
     def unregister_turn(self, turn_id: str) -> None:
         """Stop routing future turn events to the stream queue."""
@@ -207,6 +238,15 @@ class MessageRouter:
         with self._lock:
             turn_queue = self._turn_notifications.get(turn_id)
             if turn_queue is None:
+                pending_turn_ids = (
+                    self._pending_turn_starts.get(thread_id) if thread_id is not None else None
+                )
+                if pending_turn_ids is not None:
+                    pending_turn_ids.add(turn_id)
+                    self._pending_turn_notifications.setdefault(turn_id, deque()).append(
+                        notification
+                    )
+                    return
                 if notification.method == "turn/completed":
                     self._pending_turn_notifications.pop(turn_id, None)
                     return
@@ -225,6 +265,7 @@ class MessageRouter:
             self._pending_login_notifications.clear()
             turn_queues = list(self._turn_notifications.values())
             self._pending_turn_notifications.clear()
+            self._pending_turn_starts.clear()
             goal_operations = list(self._goal_operations.values())
             self._goal_operations.clear()
         # Put the same transport failure into every queue so no SDK call blocks

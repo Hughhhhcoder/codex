@@ -617,9 +617,14 @@ class CodexClient:
                 "threadId": thread_id,
                 "input": self._normalize_input_items(input_items),
             }
-            started = self.request("turn/start", payload, response_model=TurnStartResponse)
-            self.register_turn_notifications(started.turn.id)
-            return started
+            self._router.begin_turn_start(thread_id)
+            try:
+                started = self.request("turn/start", payload, response_model=TurnStartResponse)
+                self._router.complete_turn_start(thread_id, started.turn.id)
+                return started
+            except BaseException:
+                self._router.cancel_turn_start(thread_id)
+                raise
 
     @contextmanager
     def _thread_start_lock(self, thread_id: str) -> Iterator[None]:

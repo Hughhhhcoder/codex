@@ -22,6 +22,7 @@ from openai_codex.generated.v2_all import (
     ThreadTokenUsageUpdatedNotification,
     TurnCompletedNotification,
     TurnStartParams,
+    TurnStartResponse,
     WarningNotification,
 )
 from openai_codex.models import Notification, UnknownNotification
@@ -413,6 +414,73 @@ def test_turn_notification_router_buffers_events_before_registration() -> None:
         "item/agentMessage/delta",
         "early",
     )
+
+
+def test_turn_start_replays_notifications_received_before_response() -> None:
+    """turn/start should retain events that arrive before its response identifies the turn."""
+    client = CodexClient()
+
+    def fake_request(method: str, params: object, *, response_model: object) -> TurnStartResponse:
+        assert method == "turn/start"
+        assert params["threadId"] == "thread-1"  # type: ignore[index]
+        assert response_model is TurnStartResponse
+        client._router.route_notification(
+            client._coerce_notification(
+                "item/agentMessage/delta",
+                {
+                    "delta": "early",
+                    "itemId": "item-1",
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                },
+            )
+        )
+        client._router.route_notification(
+            client._coerce_notification(
+                "turn/completed",
+                {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "items": [], "status": "completed"},
+                },
+            )
+        )
+        return TurnStartResponse.model_validate(
+            {"turn": {"id": "turn-1", "items": [], "status": "completed"}}
+        )
+
+    client.request = fake_request  # type: ignore[method-assign]
+
+    started = client.turn_start("thread-1", "hello")
+    first = client.next_turn_notification(started.turn.id)
+    second = client.next_turn_notification(started.turn.id)
+
+    assert [first.method, second.method] == ["item/agentMessage/delta", "turn/completed"]
+
+
+def test_turn_start_cleans_up_retained_notifications_when_request_fails() -> None:
+    """A failed reserved turn/start should not leave an unreachable pending queue."""
+    client = CodexClient()
+
+    def fake_request(method: str, params: object, *, response_model: object) -> TurnStartResponse:
+        del method, params, response_model
+        client._router.route_notification(
+            client._coerce_notification(
+                "turn/completed",
+                {
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "items": [], "status": "completed"},
+                },
+            )
+        )
+        raise RuntimeError("turn/start failed")
+
+    client.request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="turn/start failed"):
+        client.turn_start("thread-1", "hello")
+
+    assert client._router._pending_turn_notifications == {}
+    assert client._router._pending_turn_starts == {}
 
 
 def test_turn_notification_router_clears_unregistered_turn_when_completed() -> None:
