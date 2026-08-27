@@ -97,9 +97,9 @@ class MessageRouter:
             # A turn can emit events immediately after turn/start, before the
             # caller receives the TurnHandle and starts streaming.
             pending = self._pending_turn_notifications.pop(turn_id, deque())
+            for notification in pending:
+                turn_queue.put(notification)
             self._turn_notifications[turn_id] = turn_queue
-        for notification in pending:
-            turn_queue.put(notification)
 
     def begin_turn_start(self, thread_id: str) -> None:
         """Reserve a thread so its first turn events are retained before its id is known."""
@@ -120,9 +120,12 @@ class MessageRouter:
             turn_queue = self._turn_notifications.get(turn_id)
             if turn_queue is None:
                 turn_queue = queue.Queue()
+                for notification in pending:
+                    turn_queue.put(notification)
                 self._turn_notifications[turn_id] = turn_queue
-        for notification in pending:
-            turn_queue.put(notification)
+            else:
+                for notification in pending:
+                    turn_queue.put(notification)
 
     def cancel_turn_start(self, thread_id: str) -> None:
         """Drop retained notifications when a reserved turn/start request fails."""

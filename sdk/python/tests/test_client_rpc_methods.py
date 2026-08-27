@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -455,6 +457,54 @@ def test_turn_start_replays_notifications_received_before_response() -> None:
     second = client.next_turn_notification(started.turn.id)
 
     assert [first.method, second.method] == ["item/agentMessage/delta", "turn/completed"]
+
+
+def test_turn_start_replays_pending_events_before_publishing_queue() -> None:
+    """A post-response event must not overtake notifications retained before the response."""
+    client = CodexClient()
+    client._router.begin_turn_start("thread-1")
+    client._router.route_notification(
+        client._coerce_notification(
+            "item/agentMessage/delta",
+            {
+                "delta": "early",
+                "itemId": "item-1",
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+            },
+        )
+    )
+
+    pending = client._router._pending_turn_notifications["turn-1"]
+
+    class LockCheckingNotifications(deque[Notification]):
+        def __iter__(self) -> Iterator[Notification]:
+            acquired = client._router._lock.acquire(blocking=False)
+            if acquired:
+                client._router._lock.release()
+            assert not acquired, "the turn queue was published before pending replay finished"
+            return super().__iter__()
+
+    client._router._pending_turn_notifications["turn-1"] = LockCheckingNotifications(pending)
+    client._router.complete_turn_start("thread-1", "turn-1")
+    client._router.route_notification(
+        client._coerce_notification(
+            "item/agentMessage/delta",
+            {
+                "delta": "late",
+                "itemId": "item-1",
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+            },
+        )
+    )
+
+    first = client.next_turn_notification("turn-1")
+    second = client.next_turn_notification("turn-1")
+
+    assert isinstance(first.payload, AgentMessageDeltaNotification)
+    assert isinstance(second.payload, AgentMessageDeltaNotification)
+    assert [first.payload.delta, second.payload.delta] == ["early", "late"]
 
 
 def test_turn_start_cleans_up_retained_notifications_when_request_fails() -> None:
