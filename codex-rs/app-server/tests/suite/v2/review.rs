@@ -22,6 +22,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -316,6 +317,65 @@ async fn review_start_rejects_empty_base_branch() -> Result<()> {
         error.error.message.contains("branch must not be empty"),
         "unexpected message: {}",
         error.error.message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn review_start_completes_turn_when_target_resolution_fails() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let workspace = TempDir::new()?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
+    )
+    .await??;
+
+    let ReviewStartResponse { turn, .. } = mcp
+        .request(|request_id| ClientRequest::ReviewStart {
+            request_id,
+            params: ReviewStartParams {
+                thread_id: thread.id.clone(),
+                delivery: Some(ReviewDelivery::Inline),
+                target: ReviewTarget::BaseBranch {
+                    branch: "main".to_string(),
+                },
+            },
+        })
+        .await?;
+    assert_eq!(turn.status, TurnStatus::InProgress);
+
+    let completed: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("turn/completed"),
+    )
+    .await??;
+    assert_eq!(completed.thread_id, thread.id);
+    assert_eq!(completed.turn.id, turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Failed);
+    assert!(
+        completed
+            .turn
+            .error
+            .as_ref()
+            .is_some_and(|error| error.message.contains("is not a git repository")),
+        "unexpected turn error: {:?}",
+        completed.turn.error
     );
 
     Ok(())

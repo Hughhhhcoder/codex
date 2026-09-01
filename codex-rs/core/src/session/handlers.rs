@@ -40,6 +40,7 @@ use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
@@ -508,15 +509,29 @@ pub async fn review(
             .await;
         }
         Err(err) => {
-            let event = Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    misalignment: None,
-                    message: err.to_string(),
-                    codex_error_info: Some(CodexErrorInfo::Other),
-                }),
+            let error = ErrorEvent {
+                misalignment: None,
+                message: err.to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
             };
-            sess.send_event(&turn_context, event.msg).await;
+            sess.send_event(&turn_context, EventMsg::Error(error.clone()))
+                .await;
+            // `review/start` has already returned an in-progress turn to the client. Complete
+            // the turn when resolving the review target fails so callers waiting for the
+            // terminal notification (for example `codex exec review`) do not hang forever.
+            sess.send_event(
+                &turn_context,
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: turn_context.sub_id.clone(),
+                    last_agent_message: None,
+                    error: Some(error),
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                }),
+            )
+            .await;
         }
     }
 }
