@@ -38,6 +38,8 @@ mod startup;
 mod stream_animation_tests;
 #[path = "tests/thread_usage.rs"]
 mod thread_usage;
+#[path = "tests/transcript_composer.rs"]
+mod transcript_composer;
 #[path = "tests/turn_submission.rs"]
 mod turn_submission;
 
@@ -3733,6 +3735,7 @@ async fn active_thread_file_change_approval_recovers_buffered_changes() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
         }),
         /*replay_kind*/ None,
@@ -4040,6 +4043,8 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 project_id: None,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
+                model: None,
+                reasoning_effort: None,
                 created_at: 1,
                 updated_at: 2,
                 recency_at: Some(2),
@@ -4139,6 +4144,8 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 project_id: None,
                 history_mode: Default::default(),
                 model_provider: "agent-provider".to_string(),
+                model: None,
+                reasoning_effort: None,
                 created_at: 1,
                 updated_at: 2,
                 recency_at: Some(2),
@@ -4205,6 +4212,8 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         project_id: None,
         history_mode: Default::default(),
         model_provider: "read-provider".to_string(),
+        model: None,
+        reasoning_effort: None,
         created_at: 1,
         updated_at: 2,
         recency_at: Some(2),
@@ -7546,6 +7555,7 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
                             phase: None,
                             memory_citation: None,
                             delivery: None,
+                            questions: None,
                         },
                     ],
                     status: TurnStatus::Completed,

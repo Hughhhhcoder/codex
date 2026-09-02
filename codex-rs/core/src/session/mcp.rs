@@ -724,6 +724,31 @@ async fn review_guardian_mcp_elicitation(
     let Some(mcp_config) = session.services.mcp_runtime.current_config() else {
         return Ok(None);
     };
+    let step_settings = turn_context.current_settings.load_full();
+
+    // Full Access skips inference, not the active-turn and cancellation checks.
+    if turn_context.environments.has_full_access(
+        turn_context.approval_policy(),
+        &turn_context
+            .config
+            .permissions
+            .effective_permission_profile(),
+    ) && matches!(
+        &request.elicitation,
+        Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
+            requested_schema, ..
+        }) if requested_schema.properties.is_empty()
+    ) {
+        let decision = if cancellation_token.is_cancelled() {
+            ReviewDecision::Abort
+        } else {
+            ReviewDecision::Approved
+        };
+        return Ok(Some(mcp_elicitation_response_from_guardian_decision(
+            decision,
+            turn_context.model_info(),
+        )));
+    }
 
     // The invocation identifies the tool event, but a nested elicitation can
     // review a different action and connector than the enclosing JavaScript.
@@ -893,7 +918,9 @@ async fn review_guardian_mcp_elicitation(
 
     let approvals_reviewer = crate::connectors::mcp_approvals_reviewer_from_layers(
         &mcp_config.config_layer_stack,
-        mcp_config.approvals_reviewer,
+        step_settings
+            .mcp_approvals_reviewer_override
+            .unwrap_or(mcp_config.approvals_reviewer),
         Some(turn_context.model_info().slug.as_str()),
         request.server_name.as_str(),
         elicitation_connector_id(&request.elicitation),
