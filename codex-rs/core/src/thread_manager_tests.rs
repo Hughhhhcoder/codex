@@ -2482,6 +2482,48 @@ fn mixed_response_and_legacy_user_event_history_is_mid_turn() {
     );
 }
 
+#[test]
+fn interrupted_snapshot_repairs_incomplete_custom_tool_output() {
+    let history = InitialHistory::Forked(vec![
+        RolloutItem::ResponseItem(user_msg("hello").into()),
+        RolloutItem::ResponseItem(
+            ResponseItem::CustomToolCall {
+                id: None,
+                status: Some("in_progress".to_string()),
+                call_id: "tool-call".to_string(),
+                name: "custom".to_string(),
+                namespace: None,
+                input: "{}".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+    ]);
+
+    let repaired = fork_history_from_snapshot(
+        ForkSnapshot::Interrupted,
+        history,
+        InterruptedTurnHistoryMarker::Disabled,
+    );
+    let response_items: Vec<_> = repaired
+        .get_rollout_items()
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ResponseItem(envelope) => Some(&envelope.item),
+            _ => None,
+        })
+        .collect();
+
+    assert!(matches!(
+        response_items.as_slice(),
+        [
+            ResponseItem::Message { .. },
+            ResponseItem::CustomToolCall { call_id, .. },
+            ResponseItem::CustomToolCallOutput { call_id: output_call_id, .. },
+        ] if call_id == "tool-call" && output_call_id == "tool-call"
+    ));
+}
+
 #[tokio::test]
 async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_history() {
     let temp_dir = tempdir().expect("tempdir");

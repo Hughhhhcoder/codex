@@ -35,6 +35,7 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_history::InitialHistory;
+use codex_history::ResponseItemEnvelope;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
@@ -52,6 +53,8 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -2268,6 +2271,112 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     }
 }
 
+/// Complete tool-call pairs before starting a fork from an in-progress turn.
+///
+/// A live rollout can be persisted after a tool call starts but before its output is
+/// recorded. The normal prompt normalizer repairs that shape, but intentionally panics
+/// in debug builds for custom and local-shell calls so ordinary history corruption is
+/// caught early. Forks are an expected exception: their interrupted snapshot must be
+/// usable by the child immediately and after a cold resume.
+fn repair_incomplete_tool_call_outputs(items: &mut Vec<RolloutItem>) {
+    let mut function_output_ids = HashSet::new();
+    let mut custom_tool_output_ids = HashSet::new();
+    let mut tool_search_output_ids = HashSet::new();
+
+    for item in items.iter() {
+        let RolloutItem::ResponseItem(envelope) = item else {
+            continue;
+        };
+        match &envelope.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                ..
+            } => {
+                function_output_ids.insert(call_id.as_str());
+            }
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                custom_tool_output_ids.insert(call_id.as_str());
+            }
+            ResponseItem::ToolSearchOutput {
+                call_id: Some(call_id),
+                ..
+            } => {
+                tool_search_output_ids.insert(call_id.as_str());
+            }
+            _ => {}
+        }
+    }
+
+    let mut missing_outputs = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let RolloutItem::ResponseItem(envelope) = item else {
+            continue;
+        };
+        let missing_output = match &envelope.item {
+            ResponseItem::FunctionCall { call_id, .. }
+                if !function_output_ids.contains(call_id.as_str()) =>
+            {
+                Some(ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: Some(call_id.clone()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                })
+            }
+            ResponseItem::LocalShellCall {
+                call_id: Some(call_id),
+                ..
+            } if !function_output_ids.contains(call_id.as_str()) => {
+                Some(ResponseItem::FunctionCallOutput {
+                    id: None,
+                    call_id: Some(call_id.clone()),
+                    name: None,
+                    namespace: None,
+                    output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                })
+            }
+            ResponseItem::CustomToolCall { call_id, .. }
+                if !custom_tool_output_ids.contains(call_id.as_str()) =>
+            {
+                Some(ResponseItem::CustomToolCallOutput {
+                    id: None,
+                    call_id: call_id.clone(),
+                    name: None,
+                    output: FunctionCallOutputPayload::from_text("aborted".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                })
+            }
+            ResponseItem::ToolSearchCall {
+                call_id: Some(call_id),
+                ..
+            } if !tool_search_output_ids.contains(call_id.as_str()) => {
+                Some(ResponseItem::ToolSearchOutput {
+                    id: None,
+                    call_id: Some(call_id.clone()),
+                    status: "completed".to_string(),
+                    execution: "client".to_string(),
+                    tools: Vec::new(),
+                    internal_chat_message_metadata_passthrough: None,
+                })
+            }
+            _ => None,
+        };
+        if let Some(output) = missing_output {
+            missing_outputs.push((
+                index,
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(output)),
+            ));
+        }
+    }
+
+    for (index, output) in missing_outputs.into_iter().rev() {
+        items.insert(index + 1, output);
+    }
+}
+
 fn fork_history_from_snapshot(
     snapshot: ForkSnapshot,
     history: InitialHistory,
@@ -2279,7 +2388,7 @@ fn fork_history_from_snapshot(
             truncate_before_nth_user_message(history, nth_user_message, &snapshot_state)
         }
         ForkSnapshot::Interrupted => {
-            let history = match history {
+            let mut history = match history {
                 InitialHistory::New => InitialHistory::New,
                 InitialHistory::Cleared => InitialHistory::Cleared,
                 InitialHistory::Forked(history) => InitialHistory::Forked(history),
@@ -2288,6 +2397,9 @@ fn fork_history_from_snapshot(
                 }
             };
             if snapshot_state.ends_mid_turn {
+                if let InitialHistory::Forked(items) = &mut history {
+                    repair_incomplete_tool_call_outputs(items);
+                }
                 append_interrupted_boundary(
                     history,
                     snapshot_state.active_turn_id,
