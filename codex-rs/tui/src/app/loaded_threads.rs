@@ -53,8 +53,35 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
     threads: Vec<Thread>,
     primary_thread_id: ThreadId,
 ) -> Vec<LoadedSubagentThread> {
+    let threads = filter_subagent_threads_for_primary(threads, primary_thread_id);
+    let mut loaded_threads: Vec<LoadedSubagentThread> = threads
+        .into_iter()
+        .filter_map(|thread| {
+            let thread_id = ThreadId::from_string(&thread.id).ok()?;
+            Some(LoadedSubagentThread {
+                blocks_direct_input: thread_blocks_direct_input(&thread),
+                is_running: matches!(&thread.status, ThreadStatus::Active { .. }),
+                is_closed: matches!(&thread.status, ThreadStatus::NotLoaded),
+                thread_id,
+                agent_nickname: thread.agent_nickname,
+                agent_role: thread.agent_role,
+                agent_path: thread_spawn_agent_path(&thread.source),
+            })
+        })
+        .collect();
+    loaded_threads.sort_by_key(|thread| thread.thread_id.to_string());
+    loaded_threads
+}
+
+/// Retains only subagent threads whose spawn chain leads back to `primary_thread_id`.
+///
+/// The input order is preserved so callers can retain the app server's requested sort order.
+pub(crate) fn filter_subagent_threads_for_primary(
+    threads: Vec<Thread>,
+    primary_thread_id: ThreadId,
+) -> Vec<Thread> {
     let mut threads_by_id = HashMap::new();
-    for thread in threads {
+    for thread in &threads {
         let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
             continue;
         };
@@ -83,24 +110,12 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
         }
     }
 
-    let mut loaded_threads: Vec<LoadedSubagentThread> = included
+    threads
         .into_iter()
-        .filter_map(|thread_id| {
-            threads_by_id
-                .remove(&thread_id)
-                .map(|thread| LoadedSubagentThread {
-                    blocks_direct_input: thread_blocks_direct_input(&thread),
-                    is_running: matches!(&thread.status, ThreadStatus::Active { .. }),
-                    is_closed: matches!(&thread.status, ThreadStatus::NotLoaded),
-                    thread_id,
-                    agent_nickname: thread.agent_nickname,
-                    agent_role: thread.agent_role,
-                    agent_path: thread_spawn_agent_path(&thread.source),
-                })
+        .filter(|thread| {
+            ThreadId::from_string(&thread.id).is_ok_and(|thread_id| included.contains(&thread_id))
         })
-        .collect();
-    loaded_threads.sort_by_key(|thread| thread.thread_id.to_string());
-    loaded_threads
+        .collect()
 }
 
 fn thread_spawn_agent_path(source: &SessionSource) -> Option<String> {

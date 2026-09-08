@@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadStatus;
 use std::collections::HashSet;
 
+use crate::app::loaded_threads::filter_subagent_threads_for_primary;
+
 pub(super) const AGENT_PICKER_VIEW_ID: &str = "agent-picker";
 const AGENT_PICKER_PAGE_SIZE: u32 = 100;
 const AGENT_PICKER_MAX_THREADS: usize = 1_000;
@@ -48,10 +50,10 @@ impl App {
                                 section_id: None,
                                 project_id: None,
                                 cwd: None,
-                                use_state_db_only: true,
+                                use_state_db_only: false,
                                 search_term: None,
                                 parent_thread_id: None,
-                                ancestor_thread_id: Some(root.to_string()),
+                                ancestor_thread_id: None,
                             },
                         })
                         .await
@@ -73,6 +75,7 @@ impl App {
                     };
                     cursor = Some(next_cursor);
                 }
+                let mut threads = filter_subagent_threads_for_primary(threads, root);
                 threads.reverse();
                 Ok(threads)
             }

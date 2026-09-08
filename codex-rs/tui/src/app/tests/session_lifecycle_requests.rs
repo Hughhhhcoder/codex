@@ -16,6 +16,7 @@ use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::AgentPath;
 use codex_protocol::items::AgentMessageContent;
@@ -457,9 +458,14 @@ async fn start_recording_app_server_with_realtime_speech(
                             serde_json::to_value(request)?,
                         )?;
                         if let ClientRequest::ThreadList { params, .. } = &request
-                            && let Some((root, started, release)) = blocked_thread_list.take()
+                            && let Some((_root, started, release)) = blocked_thread_list.take()
                         {
-                            assert_eq!(params.ancestor_thread_id, Some(root.to_string()));
+                            assert_eq!(params.ancestor_thread_id, None);
+                            assert!(!params.use_state_db_only);
+                            assert_eq!(
+                                params.source_kinds,
+                                Some(vec![ThreadSourceKind::SubAgentThreadSpawn])
+                            );
                             assert_eq!(params.sort_direction, Some(SortDirection::Desc));
                             let _ = started.send(());
                             let _ = release.await;
@@ -3936,6 +3942,22 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         is_running: false,
                         is_closed: false,
                     })
+                );
+
+                // Simulate a rollout that still exists after its state DB row is lost. The picker
+                // must use rollout-backed discovery rather than relying solely on the DB index.
+                let state_db = codex_state::StateRuntime::init(
+                    app.config.sqlite.clone(),
+                    app.config.model_provider_id.clone(),
+                )
+                .await
+                .expect("state DB should initialize");
+                assert_eq!(
+                    state_db
+                        .delete_thread(child_thread_id)
+                        .await
+                        .expect("child state row should be deleted"),
+                    1
                 );
 
                 let child_store = Arc::clone(
