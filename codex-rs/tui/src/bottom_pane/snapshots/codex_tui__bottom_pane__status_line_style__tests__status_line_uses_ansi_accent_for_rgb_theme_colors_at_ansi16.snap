@@ -1,0 +1,13 @@
+---
+source: tui/src/bottom_pane/status_line_style.rs
+expression: "format!(\"{buffer:?}\")"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 5, height: 1 },
+    content: [
+        "gpt-5",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Cyan, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}

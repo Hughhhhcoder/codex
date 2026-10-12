@@ -10,6 +10,7 @@ use super::status_line_setup::StatusLineItem;
 use crate::render::highlight::foreground_style_for_scopes;
 use crate::style::readable_color_on;
 use crate::style::secondary_text_style;
+use crate::terminal_palette::StdoutColorLevel;
 use crate::thread_color::thread_color;
 use codex_protocol::ThreadId;
 
@@ -135,10 +136,23 @@ where
             secondary_text_style()
         };
         let style = if use_theme_colors {
-            style.fg(readable_color_on(
-                style.fg.unwrap_or(Color::Reset),
-                /*background*/ None,
-            ))
+            let foreground = style.fg.unwrap_or(Color::Reset);
+            let readable = readable_color_on(foreground, /*background*/ None);
+            let has_theme_palette_color =
+                matches!(foreground, Color::Rgb(..) | Color::Indexed(16..=u8::MAX));
+            let foreground = if has_theme_palette_color
+                && readable == Color::Reset
+                && crate::terminal_palette::effective_stdout_color_level()
+                    == StdoutColorLevel::Ansi16
+            {
+                StatusLineAccent::for_item(item)
+                    .fallback_style()
+                    .fg
+                    .unwrap_or(Color::Reset)
+            } else {
+                readable
+            };
+            style.fg(foreground)
         } else {
             style
         };
@@ -210,7 +224,10 @@ fn soften_rgb_channel(channel: u8, luma: u16) -> u8 {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::style::Modifier;
+    use ratatui::widgets::Widget;
 
     fn line_text(line: &Line<'static>) -> String {
         line.spans
@@ -302,6 +319,50 @@ mod tests {
             ))
         );
         assert!(!line.spans[0].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn status_line_uses_ansi_accent_for_rgb_theme_colors_at_ansi16() {
+        const CHILD: &str = "CODEX_STATUS_LINE_ANSI16_TEST_CHILD";
+        let Ok(_) = std::env::var(CHILD) else {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "bottom_pane::status_line_style::tests::status_line_uses_ansi_accent_for_rgb_theme_colors_at_ansi16",
+                ])
+                .env(CHILD, "1")
+                .env("FORCE_COLOR", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+
+        assert_eq!(
+            crate::terminal_palette::effective_stdout_color_level(),
+            crate::terminal_palette::StdoutColorLevel::Ansi16
+        );
+        let line = status_line_from_segments_with_resolver(
+            [(StatusLineItem::ModelName, "gpt-5".to_string())],
+            /*use_theme_colors*/ true,
+            /*thread_id*/ None,
+            |_| Some(Style::default().fg(Color::Rgb(228, 11, 11))),
+        )
+        .expect("status line");
+
+        assert_eq!(line.spans[0].style.fg, Some(Color::Cyan));
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 5, /*height*/ 1,
+        );
+        let mut buffer = Buffer::empty(area);
+        line.render(area, &mut buffer);
+        insta::assert_snapshot!(format!("{buffer:?}"));
     }
 
     #[test]
